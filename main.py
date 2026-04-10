@@ -113,7 +113,7 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
     return json.loads(texto)
 
 
-def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str) -> str:
+def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str = "") -> str:
     """Cria uma página no database do Notion com os dados classificados."""
     print(f"[NOTION] Tentando salvar: {dados.get('nome_ferramenta')} no database {NOTION_DATABASE_ID}")
     print(f"[NOTION] Token presente: {'sim' if os.environ.get('NOTION_TOKEN') else 'NAO!'}")
@@ -162,6 +162,9 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str) -> str:
             "Observações": {
                 "rich_text": [{"text": {"content": dados.get("observacoes", "")}}]
             },
+            "Transcrição": {
+                "rich_text": [{"text": {"content": transcricao[:2000]}}]
+            },
         }
     )
     print(f"[NOTION] Salvo com sucesso! URL: {page['url']}")
@@ -193,7 +196,7 @@ async def processar_video(request: VideoRequest):
             dados = classificar_com_claude(transcricao, titulo, descricao)
 
             # 4. Salva no Notion
-            url_notion = salvar_no_notion(dados, request.url, request.fonte)
+            url_notion = salvar_no_notion(dados, request.url, request.fonte, transcricao)
 
         return {
             "sucesso": True,
