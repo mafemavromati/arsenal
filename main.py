@@ -115,6 +115,8 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
 
 def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str) -> str:
     """Cria uma página no database do Notion com os dados classificados."""
+    print(f"[NOTION] Tentando salvar: {dados.get('nome_ferramenta')} no database {NOTION_DATABASE_ID}")
+    print(f"[NOTION] Token presente: {'sim' if os.environ.get('NOTION_TOKEN') else 'NAO!'}")
     page = notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
         properties={
@@ -162,6 +164,7 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str) -> str:
             },
         }
     )
+    print(f"[NOTION] Salvo com sucesso! URL: {page['url']}")
     return page["url"]
 
 
@@ -201,6 +204,7 @@ async def processar_video(request: VideoRequest):
         }
 
     except Exception as e:
+        print(f"[ERRO] {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
