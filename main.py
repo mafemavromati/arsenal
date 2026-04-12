@@ -78,26 +78,36 @@ def transcrever_audio(caminho_audio: str) -> str:
 
 def classificar_com_claude(transcricao: str, titulo: str, descricao: str) -> dict:
     """Envia a transcrição ao Claude para classificar e estruturar."""
-    prompt = f"""Você é um assistente especializado em catalogar ferramentas e tendências de IA para uma consultora de automação.
+    prompt = f"""Você é um assistente especializado em catalogar ferramentas e tendências de IA.
 
-Analise este vídeo do TikTok e extraia as informações. O vídeo pode ser em português ou inglês.
+Analise este vídeo e extraia as informações de forma UNIVERSAL.
+Os casos de uso devem ser exemplos práticos que qualquer pessoa ou profissional poderia aplicar,
+independente de área ou background. Não direcione para nichos específicos.
+
+O vídeo pode ser em português ou inglês.
 
 TÍTULO DO VÍDEO: {titulo}
 DESCRIÇÃO: {descricao}
 TRANSCRIÇÃO: {transcricao}
 
+REGRAS PARA CASOS DE USO:
+- Seja concreto e variado: cubra perfis diferentes (criador de conteúdo, pequeno empresário, profissional liberal, gestor, freelancer)
+- Seja específico: "automatizar respostas de atendimento no WhatsApp" é melhor que "melhorar atendimento"
+- Evite casos óbvios ou genéricos demais
+- Pense em como alguém usaria isso HOJE no trabalho ou negócio
+
 Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura exata:
 {{
   "nome_ferramenta": "nome da ferramenta principal mencionada, ou 'Tendência/Dica' se não for sobre ferramenta específica",
   "categoria": "exatamente uma de: IA Generativa, Automação, Produtividade, Design, Dev, Marketing, Dados, Agentes, Outro",
-  "o_que_faz": "descrição objetiva em 1-2 frases do que a ferramenta/técnica faz",
-  "casos_de_uso": "3 casos de uso separados por vírgula",
-  "perfil_de_cliente": "para qual tipo de empresa ou profissional é mais relevante",
-  "relevancia": número inteiro de 1 a 5 baseado em impacto potencial,
+  "o_que_faz": "descrição objetiva em 1-2 frases sem jargão técnico",
+  "casos_de_uso": "3 casos de uso práticos e específicos separados por vírgula — exemplos reais de como perfis diferentes usariam isso",
+  "perfil_de_cliente": "2-3 perfis diferentes que mais se beneficiam — ex: criadores de conteúdo, donos de e-commerce, gestores de RH",
+  "relevancia": número inteiro de 1 a 5 baseado em impacto potencial e acessibilidade para o público geral,
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa",
   "tags": ["tag1", "tag2"],
-  "para_cliente": true ou false,
-  "observacoes": "qualquer observação importante ou contexto adicional"
+  "para_cliente": true se pode ser recomendada para clientes de consultoria de IA, false caso contrário,
+  "observacoes": "contexto adicional: limitações, preço estimado, alternativas ou por que se destaca"
 }}"""
 
     resposta = anthropic_client.messages.create(
