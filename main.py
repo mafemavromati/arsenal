@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 import yt_dlp
 import whisper
@@ -188,12 +188,33 @@ def health():
     return {"status": "ok", "whisper": "loaded", "timestamp": datetime.now().isoformat()}
 
 
+def processar_em_background(url: str, fonte: str):
+    """Executa o processamento completo em background — sem bloquear o Shortcut."""
+    try:
+        print(f"[BG] Iniciando processamento: {url}")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            titulo, descricao, caminho_audio = baixar_audio(url, tmpdir)
+            transcricao = transcrever_audio(caminho_audio)
+            dados = classificar_com_claude(transcricao, titulo, descricao)
+            url_notion = salvar_no_notion(dados, url, fonte, transcricao)
+            print(f"[BG] Concluído! Notion: {url_notion}")
+    except Exception as e:
+        print(f"[BG ERRO] {type(e).__name__}: {str(e)}")
+
+
 @app.post("/processar")
-async def processar_video(request: VideoRequest):
+async def processar_video(request: VideoRequest, background_tasks: BackgroundTasks):
     """
-    Endpoint principal: recebe URL do TikTok, transcreve, classifica e salva no Notion.
-    Chamado pelo n8n via webhook do iOS Shortcut.
+    Endpoint assíncrono: responde imediatamente ao Shortcut e processa em background.
+    Resolve o problema de timeout do iOS Shortcuts (30s).
     """
+    background_tasks.add_task(processar_em_background, request.url, request.fonte)
+    return {"status": "processando", "mensagem": "Vídeo recebido! O card vai aparecer no Notion em ~60 segundos."}
+
+
+@app.post("/processar-sync")
+async def processar_video_sync(request: VideoRequest):
+    """Versão síncrona para testes via curl — aguarda o processamento completo."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             # 1. Baixa o áudio
@@ -217,7 +238,7 @@ async def processar_video(request: VideoRequest):
         }
 
     except Exception as e:
-        print(f"[ERRO] {type(e).__name__}: {str(e)}")
+        print(f"[ERRO SYNC] {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
