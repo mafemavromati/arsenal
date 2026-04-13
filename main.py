@@ -160,7 +160,7 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str 
             "Para Cliente": {
                 "checkbox": dados.get("para_cliente", False)
             },
-            "URL TikTok": {
+            "URL Fonte": {
                 "url": url_tiktok
             },
             "Fonte": {
