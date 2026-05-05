@@ -9,8 +9,8 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 import yt_dlp
-import whisper
 import anthropic
+from openai import OpenAI
 from notion_client import Client as NotionClient
 from dotenv import load_dotenv
 
@@ -18,12 +18,8 @@ load_dotenv()
 
 app = FastAPI(title="Arsenal AI — TikTok Processor")
 
-# Carrega modelo Whisper uma vez na inicialização
-print("Carregando modelo Whisper...")
-whisper_model = whisper.load_model("base")
-print("Whisper pronto!")
-
 # Clientes
+openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 notion = NotionClient(auth=os.environ["NOTION_TOKEN"])
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
@@ -71,9 +67,14 @@ def baixar_audio(url: str, tmpdir: str) -> str:
 
 
 def transcrever_audio(caminho_audio: str) -> str:
-    """Transcreve o áudio com Whisper."""
-    resultado = whisper_model.transcribe(caminho_audio, language="pt")
-    return resultado["text"].strip()
+    """Transcreve o áudio via OpenAI Whisper API."""
+    with open(caminho_audio, "rb") as f:
+        resultado = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            language="pt",
+        )
+    return resultado.text.strip()
 
 
 def classificar_com_claude(transcricao: str, titulo: str, descricao: str) -> dict:
@@ -185,7 +186,7 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "whisper": "loaded", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "whisper": "api", "timestamp": datetime.now().isoformat()}
 
 
 def processar_em_background(url: str, fonte: str):
