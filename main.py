@@ -38,6 +38,12 @@ class BatchRequest(BaseModel):
     urls: list[str]
     fonte: Optional[str] = "TikTok"
 
+class EnrichRequest(BaseModel):
+    page_id: str
+
+class EnrichBatchRequest(BaseModel):
+    limite: Optional[int] = 50
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def verificar_assinatura(assinatura: str, corpo: bytes) -> bool:
@@ -49,7 +55,7 @@ def verificar_assinatura(assinatura: str, corpo: bytes) -> bool:
 
 
 def baixar_video(url: str, tmpdir: str) -> tuple:
-    """Baixa o vídeo (até 720p) e extrai o áudio em MP3 para transcrição."""
+    """Baixa o vídeo (até 720p), extrai o áudio e captura a URL do thumbnail."""
     ydl_opts = {
         "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "outtmpl": f"{tmpdir}/video.%(ext)s",
@@ -61,11 +67,11 @@ def baixar_video(url: str, tmpdir: str) -> tuple:
         info = ydl.extract_info(url, download=True)
         titulo = info.get("title", "")
         descricao = info.get("description", "")
+        thumbnail_url = info.get("thumbnail", "")
 
     arquivos = glob_module.glob(f"{tmpdir}/video.*")
     caminho_video = arquivos[0] if arquivos else None
 
-    # Extrai áudio em MP3 para o Whisper
     caminho_audio = f"{tmpdir}/audio.mp3"
     subprocess.run(
         ["ffmpeg", "-i", caminho_video, "-vn", "-ar", "16000", "-ac", "1",
@@ -73,7 +79,7 @@ def baixar_video(url: str, tmpdir: str) -> tuple:
         check=True,
     )
 
-    return titulo, descricao, caminho_video, caminho_audio
+    return titulo, descricao, caminho_video, caminho_audio, thumbnail_url
 
 
 def extrair_frames(caminho_video: str, tmpdir: str, n: int = 5) -> list[str]:
@@ -121,7 +127,6 @@ def classificar_com_claude(
     transcricao: str, titulo: str, descricao: str, frames: list[str] = None
 ) -> dict:
     """Classifica o conteúdo com Claude usando transcrição + frames visuais."""
-
     tem_transcricao = len(transcricao.strip()) > 50
 
     prompt = f"""Você é um assistente especializado em catalogar conteúdo de vídeo salvo para referência futura.
@@ -142,7 +147,7 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
   "o_que_faz": "resumo objetivo em 1-2 frases do que este vídeo ensina ou mostra",
   "casos_de_uso": "3 aplicações práticas e específicas separadas por vírgula",
   "perfil_de_cliente": "2-3 perfis que mais se beneficiam deste conteúdo",
-  "relevancia": número inteiro de 1 a 5 baseado em impacto e aplicabilidade,
+  "relevancia": número inteiro de 1 a 10 baseado em impacto e aplicabilidade,
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa",
   "tags": ["tag1", "tag2"],
   "para_cliente": true se pode ser recomendado para clientes de consultoria, false caso contrário,
@@ -150,7 +155,6 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
 }}"""
 
     content = []
-
     if frames:
         content.append({"type": "text", "text": "Frames do vídeo para análise visual:"})
         for caminho in frames:
@@ -162,7 +166,6 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
                     "data": frame_para_base64(caminho),
                 },
             })
-
     content.append({"type": "text", "text": prompt})
 
     resposta = anthropic_client.messages.create(
@@ -177,12 +180,47 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
     return json.loads(texto)
 
 
-def salvar_no_notion(dados: dict, url_video: str, fonte: str, transcricao: str = "") -> str:
-    """Cria uma página no database do Notion com os dados classificados."""
+def enriquecer_com_claude(titulo: str, observacoes: str, categoria: str, url_fonte: str) -> dict:
+    """Gera campos faltantes a partir do título e observações já existentes."""
+    prompt = f"""Você é um assistente especializado em catalogar conteúdo de referência.
+
+A entrada abaixo foi criada com dados parciais. Com base nas informações disponíveis, preencha os campos faltantes.
+
+TÍTULO: {titulo}
+CATEGORIA: {categoria}
+URL: {url_fonte}
+OBSERVAÇÕES (análise editorial existente):
+{observacoes}
+
+Retorne APENAS um JSON válido, sem markdown, sem backticks:
+{{
+  "o_que_faz": "resumo objetivo em 1-2 frases do que este conteúdo ou ferramenta faz",
+  "casos_de_uso": "3 aplicações práticas e específicas separadas por vírgula",
+  "perfil_de_cliente": "2-3 perfis que mais se beneficiam",
+  "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa"
+}}"""
+
+    resposta = anthropic_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    import json
+    texto = resposta.content[0].text.strip()
+    texto = texto.replace("```json", "").replace("```", "").strip()
+    return json.loads(texto)
+
+
+def salvar_no_notion(
+    dados: dict, url_video: str, fonte: str, transcricao: str = "", thumbnail_url: str = ""
+) -> str:
+    """Cria uma página no Notion com os dados classificados e thumbnail como cover."""
     print(f"[NOTION] Salvando: {dados.get('nome_ferramenta')} | {dados.get('categoria')}")
-    page = notion.pages.create(
-        parent={"database_id": NOTION_DATABASE_ID},
-        properties={
+
+    create_params = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
             "Título": {
                 "title": [{"text": {"content": dados["nome_ferramenta"]}}]
             },
@@ -229,7 +267,12 @@ def salvar_no_notion(dados: dict, url_video: str, fonte: str, transcricao: str =
                 "rich_text": [{"text": {"content": transcricao[:2000]}}]
             },
         },
-    )
+    }
+
+    if thumbnail_url:
+        create_params["cover"] = {"type": "external", "external": {"url": thumbnail_url}}
+
+    page = notion.pages.create(**create_params)
     print(f"[NOTION] Salvo! URL: {page['url']}")
     return page["url"]
 
@@ -238,7 +281,13 @@ def salvar_no_notion(dados: dict, url_video: str, fonte: str, transcricao: str =
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "whisper": "api", "vision": "enabled", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "ok",
+        "whisper": "api",
+        "vision": "enabled",
+        "enrich": "enabled",
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 def processar_em_background(url: str, fonte: str):
@@ -246,11 +295,11 @@ def processar_em_background(url: str, fonte: str):
     try:
         print(f"[BG] Iniciando: {url}")
         with tempfile.TemporaryDirectory() as tmpdir:
-            titulo, descricao, caminho_video, caminho_audio = baixar_video(url, tmpdir)
+            titulo, descricao, caminho_video, caminho_audio, thumbnail_url = baixar_video(url, tmpdir)
             transcricao = transcrever_audio(caminho_audio)
             frames = extrair_frames(caminho_video, tmpdir)
             dados = classificar_com_claude(transcricao, titulo, descricao, frames)
-            url_notion = salvar_no_notion(dados, url, fonte, transcricao)
+            url_notion = salvar_no_notion(dados, url, fonte, transcricao, thumbnail_url)
             print(f"[BG] Concluído! {dados['nome_ferramenta']} → {url_notion}")
     except Exception as e:
         print(f"[BG ERRO] {type(e).__name__}: {str(e)}")
@@ -265,14 +314,14 @@ async def processar_video(request: VideoRequest, background_tasks: BackgroundTas
 
 @app.post("/processar-sync")
 async def processar_video_sync(request: VideoRequest):
-    """Versão síncrona para testes via curl — aguarda o processamento completo."""
+    """Versão síncrona para testes via curl."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            titulo, descricao, caminho_video, caminho_audio = baixar_video(request.url, tmpdir)
+            titulo, descricao, caminho_video, caminho_audio, thumbnail_url = baixar_video(request.url, tmpdir)
             transcricao = transcrever_audio(caminho_audio)
             frames = extrair_frames(caminho_video, tmpdir)
             dados = classificar_com_claude(transcricao, titulo, descricao, frames)
-            url_notion = salvar_no_notion(dados, request.url, request.fonte, transcricao)
+            url_notion = salvar_no_notion(dados, request.url, request.fonte, transcricao, thumbnail_url)
 
         return {
             "sucesso": True,
@@ -281,10 +330,154 @@ async def processar_video_sync(request: VideoRequest):
             "relevancia": dados["relevancia"],
             "notion_url": url_notion,
         }
-
     except Exception as e:
         print(f"[ERRO SYNC] {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/enriquecer")
+async def enriquecer_entrada(request: EnrichRequest):
+    """Preenche campos vazios de uma entrada existente usando Claude."""
+    try:
+        page = notion.pages.retrieve(request.page_id)
+        props = page["properties"]
+
+        def get_text(prop_name):
+            items = props.get(prop_name, {}).get("rich_text", [])
+            return items[0]["text"]["content"] if items else ""
+
+        def get_select(prop_name):
+            sel = props.get(prop_name, {}).get("select")
+            return sel["name"] if sel else ""
+
+        def get_title(prop_name):
+            items = props.get(prop_name, {}).get("title", [])
+            return items[0]["text"]["content"] if items else ""
+
+        def get_url(prop_name):
+            return props.get(prop_name, {}).get("url", "") or ""
+
+        titulo = get_title("Título")
+        observacoes = get_text("Observações")
+        o_que_faz = get_text("O que faz")
+        categoria = get_select("Categoria")
+        url_fonte = get_url("URL Fonte")
+
+        if o_que_faz:
+            return {"status": "skip", "mensagem": "Entrada já está completa.", "page_id": request.page_id}
+
+        if not observacoes and not titulo:
+            return {"status": "skip", "mensagem": "Dados insuficientes para enriquecer.", "page_id": request.page_id}
+
+        dados = enriquecer_com_claude(titulo, observacoes, categoria, url_fonte)
+
+        update_props = {}
+        if dados.get("o_que_faz"):
+            update_props["O que faz"] = {"rich_text": [{"text": {"content": dados["o_que_faz"]}}]}
+        if dados.get("casos_de_uso"):
+            update_props["Casos de Uso"] = {"rich_text": [{"text": {"content": dados["casos_de_uso"]}}]}
+        if dados.get("perfil_de_cliente"):
+            update_props["Perfil de Cliente"] = {"rich_text": [{"text": {"content": dados["perfil_de_cliente"]}}]}
+        if dados.get("novidade") and not get_select("Novidade"):
+            update_props["Novidade"] = {"select": {"name": dados["novidade"]}}
+
+        notion.pages.update(request.page_id, properties=update_props)
+        print(f"[ENRICH] ✅ {titulo} — campos: {list(update_props.keys())}")
+
+        return {
+            "status": "ok",
+            "page_id": request.page_id,
+            "titulo": titulo,
+            "campos_preenchidos": list(update_props.keys()),
+        }
+
+    except Exception as e:
+        print(f"[ENRICH ERRO] {type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def enriquecer_batch_em_background(limite: int):
+    """Busca entradas com 'O que faz' vazio e enriquece em batch."""
+    import time
+
+    try:
+        print(f"[ENRICH-BATCH] Buscando até {limite} entradas vazias...")
+        response = notion.databases.query(
+            database_id=NOTION_DATABASE_ID,
+            filter={"property": "O que faz", "rich_text": {"is_empty": True}},
+            page_size=min(limite, 100),
+        )
+        pages = response.get("results", [])
+        print(f"[ENRICH-BATCH] {len(pages)} entradas encontradas")
+
+        ok, skip, erros = 0, 0, 0
+        for page in pages:
+            try:
+                props = page["properties"]
+
+                def get_text(prop_name):
+                    items = props.get(prop_name, {}).get("rich_text", [])
+                    return items[0]["text"]["content"] if items else ""
+
+                def get_select(prop_name):
+                    sel = props.get(prop_name, {}).get("select")
+                    return sel["name"] if sel else ""
+
+                def get_title(prop_name):
+                    items = props.get(prop_name, {}).get("title", [])
+                    return items[0]["text"]["content"] if items else ""
+
+                def get_url(prop_name):
+                    return props.get(prop_name, {}).get("url", "") or ""
+
+                titulo = get_title("Título")
+                observacoes = get_text("Observações")
+                categoria = get_select("Categoria")
+                url_fonte = get_url("URL Fonte")
+
+                if not observacoes and not titulo:
+                    skip += 1
+                    continue
+
+                dados = enriquecer_com_claude(titulo, observacoes, categoria, url_fonte)
+
+                update_props = {}
+                if dados.get("o_que_faz"):
+                    update_props["O que faz"] = {"rich_text": [{"text": {"content": dados["o_que_faz"]}}]}
+                if dados.get("casos_de_uso"):
+                    update_props["Casos de Uso"] = {"rich_text": [{"text": {"content": dados["casos_de_uso"]}}]}
+                if dados.get("perfil_de_cliente"):
+                    update_props["Perfil de Cliente"] = {"rich_text": [{"text": {"content": dados["perfil_de_cliente"]}}]}
+                if dados.get("novidade") and not get_select("Novidade"):
+                    update_props["Novidade"] = {"select": {"name": dados["novidade"]}}
+
+                if update_props:
+                    notion.pages.update(page["id"], properties=update_props)
+                    ok += 1
+                    print(f"[ENRICH-BATCH] ✅ {titulo}")
+                else:
+                    skip += 1
+
+                time.sleep(0.5)  # respeita rate limit da Notion API
+
+            except Exception as e:
+                erros += 1
+                print(f"[ENRICH-BATCH ERRO] {page.get('id')}: {str(e)}")
+
+        print(f"[ENRICH-BATCH] Concluído — ok:{ok} skip:{skip} erros:{erros}")
+
+    except Exception as e:
+        print(f"[ENRICH-BATCH FATAL] {type(e).__name__}: {str(e)}")
+
+
+@app.post("/enriquecer-batch")
+async def enriquecer_batch(request: EnrichBatchRequest, background_tasks: BackgroundTasks):
+    """Enriquece em batch todas as entradas com 'O que faz' vazio."""
+    background_tasks.add_task(enriquecer_batch_em_background, request.limite)
+    return {
+        "status": "processando",
+        "mensagem": f"Enriquecimento iniciado para até {request.limite} entradas. Acompanhe nos logs do Railway.",
+    }
 
 
 @app.post("/batch")
