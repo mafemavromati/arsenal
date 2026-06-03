@@ -183,7 +183,7 @@ def salvar_no_notion(dados: dict, url_video: str, fonte: str, transcricao: str =
     page = notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
         properties={
-            "Nome da Ferramenta": {
+            "Título": {
                 "title": [{"text": {"content": dados["nome_ferramenta"]}}]
             },
             "Categoria": {
