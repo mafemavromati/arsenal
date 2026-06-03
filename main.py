@@ -3,10 +3,13 @@ import tempfile
 import hashlib
 import hmac
 import asyncio
+import subprocess
+import base64
+import glob as glob_module
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import yt_dlp
 import anthropic
@@ -16,7 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Arsenal AI — TikTok Processor")
+app = FastAPI(title="Arsenal AI — Video Processor")
 
 # Clientes
 openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -45,16 +48,12 @@ def verificar_assinatura(assinatura: str, corpo: bytes) -> bool:
     return hmac.compare_digest(assinatura, esperado)
 
 
-def baixar_audio(url: str, tmpdir: str) -> str:
-    """Baixa apenas o áudio do vídeo usando yt-dlp."""
+def baixar_video(url: str, tmpdir: str) -> tuple:
+    """Baixa o vídeo (até 720p) e extrai o áudio em MP3 para transcrição."""
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": f"{tmpdir}/audio.%(ext)s",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "128",
-        }],
+        "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "outtmpl": f"{tmpdir}/video.%(ext)s",
+        "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
     }
@@ -63,7 +62,48 @@ def baixar_audio(url: str, tmpdir: str) -> str:
         titulo = info.get("title", "")
         descricao = info.get("description", "")
 
-    return titulo, descricao, f"{tmpdir}/audio.mp3"
+    arquivos = glob_module.glob(f"{tmpdir}/video.*")
+    caminho_video = arquivos[0] if arquivos else None
+
+    # Extrai áudio em MP3 para o Whisper
+    caminho_audio = f"{tmpdir}/audio.mp3"
+    subprocess.run(
+        ["ffmpeg", "-i", caminho_video, "-vn", "-ar", "16000", "-ac", "1",
+         "-b:a", "128k", caminho_audio, "-y", "-loglevel", "quiet"],
+        check=True,
+    )
+
+    return titulo, descricao, caminho_video, caminho_audio
+
+
+def extrair_frames(caminho_video: str, tmpdir: str, n: int = 5) -> list[str]:
+    """Extrai N frames distribuídos ao longo do vídeo."""
+    import json as _json
+
+    resultado = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", caminho_video],
+        capture_output=True, text=True, check=True,
+    )
+    duracao = float(_json.loads(resultado.stdout)["format"]["duration"])
+
+    frames = []
+    for i in range(n):
+        t = duracao * (i + 1) / (n + 1)
+        caminho_frame = f"{tmpdir}/frame_{i:02d}.jpg"
+        subprocess.run(
+            ["ffmpeg", "-ss", str(t), "-i", caminho_video,
+             "-vframes", "1", "-q:v", "2", caminho_frame, "-y", "-loglevel", "quiet"],
+            check=True,
+        )
+        if os.path.exists(caminho_frame):
+            frames.append(caminho_frame)
+
+    return frames
+
+
+def frame_para_base64(caminho: str) -> str:
+    with open(caminho, "rb") as f:
+        return base64.b64encode(f.read()).decode()
 
 
 def transcrever_audio(caminho_audio: str) -> str:
@@ -77,57 +117,69 @@ def transcrever_audio(caminho_audio: str) -> str:
     return resultado.text.strip()
 
 
-def classificar_com_claude(transcricao: str, titulo: str, descricao: str) -> dict:
-    """Envia a transcrição ao Claude para classificar e estruturar."""
-    prompt = f"""Você é um assistente especializado em catalogar ferramentas e tendências de IA.
+def classificar_com_claude(
+    transcricao: str, titulo: str, descricao: str, frames: list[str] = None
+) -> dict:
+    """Classifica o conteúdo com Claude usando transcrição + frames visuais."""
 
-Analise este vídeo e extraia as informações de forma UNIVERSAL.
-Os casos de uso devem ser exemplos práticos que qualquer pessoa ou profissional poderia aplicar,
-independente de área ou background. Não direcione para nichos específicos.
+    tem_transcricao = len(transcricao.strip()) > 50
+
+    prompt = f"""Você é um assistente especializado em catalogar conteúdo de vídeo salvo para referência futura.
+
+O vídeo pode ser sobre qualquer tema relevante: ferramentas de IA, dicas de marketing, inspirações de conteúdo, estratégias de negócio, produtividade, design, desenvolvimento, dados, etc.
+{"Use os frames do vídeo como fonte principal — o áudio tem pouco ou nenhum conteúdo textual." if not tem_transcricao else "Use tanto a transcrição quanto os frames para uma análise completa."}
 
 O vídeo pode ser em português ou inglês.
 
-TÍTULO DO VÍDEO: {titulo}
+TÍTULO: {titulo}
 DESCRIÇÃO: {descricao}
-TRANSCRIÇÃO: {transcricao}
-
-REGRAS PARA CASOS DE USO:
-- Seja concreto e variado: cubra perfis diferentes (criador de conteúdo, pequeno empresário, profissional liberal, gestor, freelancer)
-- Seja específico: "automatizar respostas de atendimento no WhatsApp" é melhor que "melhorar atendimento"
-- Evite casos óbvios ou genéricos demais
-- Pense em como alguém usaria isso HOJE no trabalho ou negócio
+TRANSCRIÇÃO: {transcricao if transcricao else "(sem conteúdo de áudio)"}
 
 Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura exata:
 {{
-  "nome_ferramenta": "nome da ferramenta principal mencionada, ou 'Tendência/Dica' se não for sobre ferramenta específica",
-  "categoria": "exatamente uma de: IA Generativa, Automação, Produtividade, Design, Dev, Marketing, Dados, Agentes, Outro",
-  "o_que_faz": "descrição objetiva em 1-2 frases sem jargão técnico",
-  "casos_de_uso": "3 casos de uso práticos e específicos separados por vírgula — exemplos reais de como perfis diferentes usariam isso",
-  "perfil_de_cliente": "2-3 perfis diferentes que mais se beneficiam — ex: criadores de conteúdo, donos de e-commerce, gestores de RH",
-  "relevancia": número inteiro de 1 a 5 baseado em impacto potencial e acessibilidade para o público geral,
+  "nome_ferramenta": "título curto e descritivo para este conteúdo (nome de ferramenta, tema da dica, assunto da inspiração, etc.)",
+  "categoria": "exatamente uma de: Ferramenta IA, Automação, Marketing, Conteúdo, Produtividade, Design, Dev, Dados, Negócios, Outro",
+  "o_que_faz": "resumo objetivo em 1-2 frases do que este vídeo ensina ou mostra",
+  "casos_de_uso": "3 aplicações práticas e específicas separadas por vírgula",
+  "perfil_de_cliente": "2-3 perfis que mais se beneficiam deste conteúdo",
+  "relevancia": número inteiro de 1 a 5 baseado em impacto e aplicabilidade,
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa",
   "tags": ["tag1", "tag2"],
-  "para_cliente": true se pode ser recomendada para clientes de consultoria de IA, false caso contrário,
-  "observacoes": "contexto adicional: limitações, preço estimado, alternativas ou por que se destaca"
+  "para_cliente": true se pode ser recomendado para clientes de consultoria, false caso contrário,
+  "observacoes": "contexto adicional, limitações, alternativas ou por que se destaca"
 }}"""
+
+    content = []
+
+    if frames:
+        content.append({"type": "text", "text": "Frames do vídeo para análise visual:"})
+        for caminho in frames:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": frame_para_base64(caminho),
+                },
+            })
+
+    content.append({"type": "text", "text": prompt})
 
     resposta = anthropic_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": content}],
     )
 
     import json
     texto = resposta.content[0].text.strip()
-    # Remove backticks se o modelo os incluir mesmo assim
     texto = texto.replace("```json", "").replace("```", "").strip()
     return json.loads(texto)
 
 
-def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str = "") -> str:
+def salvar_no_notion(dados: dict, url_video: str, fonte: str, transcricao: str = "") -> str:
     """Cria uma página no database do Notion com os dados classificados."""
-    print(f"[NOTION] Tentando salvar: {dados.get('nome_ferramenta')} no database {NOTION_DATABASE_ID}")
-    print(f"[NOTION] Token presente: {'sim' if os.environ.get('NOTION_TOKEN') else 'NAO!'}")
+    print(f"[NOTION] Salvando: {dados.get('nome_ferramenta')} | {dados.get('categoria')}")
     page = notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
         properties={
@@ -162,7 +214,7 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str 
                 "checkbox": dados.get("para_cliente", False)
             },
             "URL Fonte": {
-                "url": url_tiktok
+                "url": url_video
             },
             "Fonte": {
                 "select": {"name": fonte}
@@ -176,9 +228,9 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str 
             "Transcrição": {
                 "rich_text": [{"text": {"content": transcricao[:2000]}}]
             },
-        }
+        },
     )
-    print(f"[NOTION] Salvo com sucesso! URL: {page['url']}")
+    print(f"[NOTION] Salvo! URL: {page['url']}")
     return page["url"]
 
 
@@ -186,29 +238,27 @@ def salvar_no_notion(dados: dict, url_tiktok: str, fonte: str, transcricao: str 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "whisper": "api", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "whisper": "api", "vision": "enabled", "timestamp": datetime.now().isoformat()}
 
 
 def processar_em_background(url: str, fonte: str):
     """Executa o processamento completo em background — sem bloquear o Shortcut."""
     try:
-        print(f"[BG] Iniciando processamento: {url}")
+        print(f"[BG] Iniciando: {url}")
         with tempfile.TemporaryDirectory() as tmpdir:
-            titulo, descricao, caminho_audio = baixar_audio(url, tmpdir)
+            titulo, descricao, caminho_video, caminho_audio = baixar_video(url, tmpdir)
             transcricao = transcrever_audio(caminho_audio)
-            dados = classificar_com_claude(transcricao, titulo, descricao)
+            frames = extrair_frames(caminho_video, tmpdir)
+            dados = classificar_com_claude(transcricao, titulo, descricao, frames)
             url_notion = salvar_no_notion(dados, url, fonte, transcricao)
-            print(f"[BG] Concluído! Notion: {url_notion}")
+            print(f"[BG] Concluído! {dados['nome_ferramenta']} → {url_notion}")
     except Exception as e:
         print(f"[BG ERRO] {type(e).__name__}: {str(e)}")
 
 
 @app.post("/processar")
 async def processar_video(request: VideoRequest, background_tasks: BackgroundTasks):
-    """
-    Endpoint assíncrono: responde imediatamente ao Shortcut e processa em background.
-    Resolve o problema de timeout do iOS Shortcuts (30s).
-    """
+    """Endpoint assíncrono — responde imediatamente, processa em background."""
     background_tasks.add_task(processar_em_background, request.url, request.fonte)
     return {"status": "processando", "mensagem": "Vídeo recebido! O card vai aparecer no Notion em ~60 segundos."}
 
@@ -218,16 +268,10 @@ async def processar_video_sync(request: VideoRequest):
     """Versão síncrona para testes via curl — aguarda o processamento completo."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 1. Baixa o áudio
-            titulo, descricao, caminho_audio = baixar_audio(request.url, tmpdir)
-
-            # 2. Transcreve com Whisper
+            titulo, descricao, caminho_video, caminho_audio = baixar_video(request.url, tmpdir)
             transcricao = transcrever_audio(caminho_audio)
-
-            # 3. Classifica com Claude
-            dados = classificar_com_claude(transcricao, titulo, descricao)
-
-            # 4. Salva no Notion
+            frames = extrair_frames(caminho_video, tmpdir)
+            dados = classificar_com_claude(transcricao, titulo, descricao, frames)
             url_notion = salvar_no_notion(dados, request.url, request.fonte, transcricao)
 
         return {
@@ -245,10 +289,7 @@ async def processar_video_sync(request: VideoRequest):
 
 @app.post("/batch")
 async def processar_batch(request: BatchRequest):
-    """
-    Processa múltiplos vídeos salvos (para o batch do último mês).
-    Roda sequencialmente para não sobrecarregar o Railway.
-    """
+    """Processa múltiplos vídeos sequencialmente."""
     resultados = []
     erros = []
 
@@ -256,7 +297,6 @@ async def processar_batch(request: BatchRequest):
         try:
             resultado = await processar_video(VideoRequest(url=url, fonte=request.fonte))
             resultados.append(resultado)
-            # Pequena pausa para não sobrecarregar APIs
             await asyncio.sleep(2)
         except Exception as e:
             erros.append({"url": url, "erro": str(e)})
