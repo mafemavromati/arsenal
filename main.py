@@ -510,7 +510,7 @@ async def enriquecer_batch(request: EnrichBatchRequest, background_tasks: Backgr
 
 @app.post("/transcrever")
 async def transcrever_video(request: VideoRequest):
-    """Transcreve qualquer vídeo — curto ou longo, com chunking automático."""
+    """Transcreve qualquer vídeo, classifica com Claude e salva no Notion."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts = {
@@ -523,6 +523,8 @@ async def transcrever_video(request: VideoRequest):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(request.url, download=True)
                 titulo = info.get("title", "")
+                descricao = info.get("description", "")
+                thumbnail_url = info.get("thumbnail", "")
 
             arquivos = glob_module.glob(f"{tmpdir}/audio.*")
             caminho_audio = arquivos[0] if arquivos else f"{tmpdir}/audio.mp3"
@@ -531,7 +533,21 @@ async def transcrever_video(request: VideoRequest):
             print(f"[TRANSCRICAO] {titulo} ({tamanho_mb:.1f} MB)")
             transcricao = transcrever_audio(caminho_audio)
 
-        return {"titulo": titulo, "transcricao": transcricao, "caracteres": len(transcricao)}
+        # Classifica com Claude (sem frames — transcrição é suficiente)
+        dados = classificar_com_claude(transcricao, titulo, descricao)
+
+        # Salva no Notion
+        url_notion = salvar_no_notion(dados, request.url, request.fonte, transcricao, thumbnail_url)
+        print(f"[TRANSCRICAO] Salvo no Notion: {url_notion}")
+
+        return {
+            "titulo": titulo,
+            "ferramenta": dados["nome_ferramenta"],
+            "categoria": dados["categoria"],
+            "notion_url": url_notion,
+            "caracteres": len(transcricao),
+            "transcricao": transcricao,
+        }
 
     except Exception as e:
         print(f"[TRANSCRICAO ERRO] {type(e).__name__}: {str(e)}")
