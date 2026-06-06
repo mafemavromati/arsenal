@@ -150,7 +150,6 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
   "relevancia": número inteiro de 1 a 10 baseado em impacto e aplicabilidade,
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa",
   "tags": ["tag1", "tag2"],
-  "para_cliente": true se pode ser recomendado para clientes de consultoria, false caso contrário,
   "observacoes": "contexto adicional, limitações, alternativas ou por que se destaca"
 }}"""
 
@@ -247,9 +246,6 @@ def salvar_no_notion(
             },
             "Status": {
                 "select": {"name": "📥 Na fila"}
-            },
-            "Para Cliente": {
-                "checkbox": dados.get("para_cliente", False)
             },
             "URL Fonte": {
                 "url": url_video
