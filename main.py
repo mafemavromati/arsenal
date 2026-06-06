@@ -476,6 +476,79 @@ async def enriquecer_batch(request: EnrichBatchRequest, background_tasks: Backgr
     }
 
 
+def transcrever_audio_longo(caminho_audio: str) -> str:
+    """Transcreve áudios longos dividindo em chunks de 24 MB."""
+    tamanho = os.path.getsize(caminho_audio)
+    limite = 24 * 1024 * 1024  # 24 MB
+
+    if tamanho <= limite:
+        with open(caminho_audio, "rb") as f:
+            return openai_client.audio.transcriptions.create(
+                model="whisper-1", file=f, language="pt"
+            ).text.strip()
+
+    # Descobre duração total
+    import json as _json
+    resultado = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", caminho_audio],
+        capture_output=True, text=True, check=True,
+    )
+    duracao = float(_json.loads(resultado.stdout)["format"]["duration"])
+
+    # Calcula quantos chunks são necessários
+    n_chunks = -(-tamanho // limite)  # divisão com teto
+    dur_chunk = duracao / n_chunks
+
+    transcricoes = []
+    with tempfile.TemporaryDirectory() as tmpchunks:
+        for i in range(n_chunks):
+            inicio = i * dur_chunk
+            chunk_path = os.path.join(tmpchunks, f"chunk_{i:02d}.mp3")
+            subprocess.run(
+                ["ffmpeg", "-ss", str(inicio), "-t", str(dur_chunk),
+                 "-i", caminho_audio, "-ar", "16000", "-ac", "1",
+                 chunk_path, "-y", "-loglevel", "quiet"],
+                check=True,
+            )
+            print(f"[TRANSCRICAO] Chunk {i+1}/{n_chunks}...")
+            with open(chunk_path, "rb") as f:
+                texto = openai_client.audio.transcriptions.create(
+                    model="whisper-1", file=f, language="pt"
+                ).text.strip()
+            transcricoes.append(texto)
+
+    return " ".join(transcricoes)
+
+
+@app.post("/transcrever")
+async def transcrever_video(request: VideoRequest):
+    """Transcreve o áudio de qualquer vídeo, incluindo vídeos longos (chunking automático)."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"{tmpdir}/audio.%(ext)s",
+                "postprocessors": [{"key": "FFmpegExtractAudio",
+                                    "preferredcodec": "mp3", "preferredquality": "64"}],
+                "quiet": True, "no_warnings": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(request.url, download=True)
+                titulo = info.get("title", "")
+
+            arquivos = glob_module.glob(f"{tmpdir}/audio.*")
+            caminho_audio = arquivos[0] if arquivos else f"{tmpdir}/audio.mp3"
+
+            print(f"[TRANSCRICAO] Iniciando: {titulo} ({os.path.getsize(caminho_audio) / 1024 / 1024:.1f} MB)")
+            transcricao = transcrever_audio_longo(caminho_audio)
+
+        return {"titulo": titulo, "transcricao": transcricao, "caracteres": len(transcricao)}
+
+    except Exception as e:
+        print(f"[TRANSCRICAO ERRO] {type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/batch")
 async def processar_batch(request: BatchRequest):
     """Processa múltiplos vídeos sequencialmente."""
