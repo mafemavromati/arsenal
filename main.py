@@ -113,14 +113,46 @@ def frame_para_base64(caminho: str) -> str:
 
 
 def transcrever_audio(caminho_audio: str) -> str:
-    """Transcreve o áudio via OpenAI Whisper API."""
-    with open(caminho_audio, "rb") as f:
-        resultado = openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            language="pt",
-        )
-    return resultado.text.strip()
+    """Transcreve o áudio via Whisper API. Divide automaticamente em chunks se > 24 MB."""
+    import json as _json
+    tamanho = os.path.getsize(caminho_audio)
+    limite = 24 * 1024 * 1024  # 24 MB
+
+    if tamanho <= limite:
+        with open(caminho_audio, "rb") as f:
+            return openai_client.audio.transcriptions.create(
+                model="whisper-1", file=f, language="pt"
+            ).text.strip()
+
+    # Áudio longo: divide em chunks proporcionais ao tamanho
+    resultado = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", caminho_audio],
+        capture_output=True, text=True, check=True,
+    )
+    duracao = float(_json.loads(resultado.stdout)["format"]["duration"])
+    n_chunks = -(-tamanho // limite)  # divisão com teto
+    dur_chunk = duracao / n_chunks
+
+    print(f"[TRANSCRICAO] Arquivo grande ({tamanho / 1024 / 1024:.1f} MB) — dividindo em {n_chunks} chunks...")
+    transcricoes = []
+    with tempfile.TemporaryDirectory() as tmpchunks:
+        for i in range(n_chunks):
+            inicio = i * dur_chunk
+            chunk_path = os.path.join(tmpchunks, f"chunk_{i:02d}.mp3")
+            subprocess.run(
+                ["ffmpeg", "-ss", str(inicio), "-t", str(dur_chunk),
+                 "-i", caminho_audio, "-ar", "16000", "-ac", "1",
+                 chunk_path, "-y", "-loglevel", "quiet"],
+                check=True,
+            )
+            print(f"[TRANSCRICAO] Chunk {i + 1}/{n_chunks}...")
+            with open(chunk_path, "rb") as f:
+                texto = openai_client.audio.transcriptions.create(
+                    model="whisper-1", file=f, language="pt"
+                ).text.strip()
+            transcricoes.append(texto)
+
+    return " ".join(transcricoes)
 
 
 def classificar_com_claude(
@@ -476,53 +508,9 @@ async def enriquecer_batch(request: EnrichBatchRequest, background_tasks: Backgr
     }
 
 
-def transcrever_audio_longo(caminho_audio: str) -> str:
-    """Transcreve áudios longos dividindo em chunks de 24 MB."""
-    tamanho = os.path.getsize(caminho_audio)
-    limite = 24 * 1024 * 1024  # 24 MB
-
-    if tamanho <= limite:
-        with open(caminho_audio, "rb") as f:
-            return openai_client.audio.transcriptions.create(
-                model="whisper-1", file=f, language="pt"
-            ).text.strip()
-
-    # Descobre duração total
-    import json as _json
-    resultado = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", caminho_audio],
-        capture_output=True, text=True, check=True,
-    )
-    duracao = float(_json.loads(resultado.stdout)["format"]["duration"])
-
-    # Calcula quantos chunks são necessários
-    n_chunks = -(-tamanho // limite)  # divisão com teto
-    dur_chunk = duracao / n_chunks
-
-    transcricoes = []
-    with tempfile.TemporaryDirectory() as tmpchunks:
-        for i in range(n_chunks):
-            inicio = i * dur_chunk
-            chunk_path = os.path.join(tmpchunks, f"chunk_{i:02d}.mp3")
-            subprocess.run(
-                ["ffmpeg", "-ss", str(inicio), "-t", str(dur_chunk),
-                 "-i", caminho_audio, "-ar", "16000", "-ac", "1",
-                 chunk_path, "-y", "-loglevel", "quiet"],
-                check=True,
-            )
-            print(f"[TRANSCRICAO] Chunk {i+1}/{n_chunks}...")
-            with open(chunk_path, "rb") as f:
-                texto = openai_client.audio.transcriptions.create(
-                    model="whisper-1", file=f, language="pt"
-                ).text.strip()
-            transcricoes.append(texto)
-
-    return " ".join(transcricoes)
-
-
 @app.post("/transcrever")
 async def transcrever_video(request: VideoRequest):
-    """Transcreve o áudio de qualquer vídeo, incluindo vídeos longos (chunking automático)."""
+    """Transcreve qualquer vídeo — curto ou longo, com chunking automático."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts = {
@@ -539,8 +527,9 @@ async def transcrever_video(request: VideoRequest):
             arquivos = glob_module.glob(f"{tmpdir}/audio.*")
             caminho_audio = arquivos[0] if arquivos else f"{tmpdir}/audio.mp3"
 
-            print(f"[TRANSCRICAO] Iniciando: {titulo} ({os.path.getsize(caminho_audio) / 1024 / 1024:.1f} MB)")
-            transcricao = transcrever_audio_longo(caminho_audio)
+            tamanho_mb = os.path.getsize(caminho_audio) / 1024 / 1024
+            print(f"[TRANSCRICAO] {titulo} ({tamanho_mb:.1f} MB)")
+            transcricao = transcrever_audio(caminho_audio)
 
         return {"titulo": titulo, "transcricao": transcricao, "caracteres": len(transcricao)}
 
