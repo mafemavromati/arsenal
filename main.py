@@ -243,11 +243,34 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks:
     return json.loads(texto)
 
 
+def _rich_text_blocks(texto: str, limite_prop: int = 20000) -> list:
+    """Divide texto em blocos de 2000 chars para rich_text do Notion (máx. 10 blocos = 20k chars)."""
+    texto = texto[:limite_prop]
+    return [{"text": {"content": texto[i:i+2000]}} for i in range(0, len(texto), 2000)] if texto else []
+
+
+def _blocos_corpo(texto: str, offset: int = 20000) -> list:
+    """Converte o excedente (além de 20k chars) em blocos paragraph para o corpo da página."""
+    restante = texto[offset:]
+    if not restante:
+        return []
+    blocos = []
+    for i in range(0, len(restante), 2000):
+        blocos.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": restante[i:i+2000]}}]
+            }
+        })
+    return blocos
+
+
 def salvar_no_notion(
     dados: dict, url_video: str, fonte: str, transcricao: str = "", thumbnail_url: str = ""
 ) -> str:
     """Cria uma página no Notion com os dados classificados e thumbnail como cover."""
-    print(f"[NOTION] Salvando: {dados.get('nome_ferramenta')} | {dados.get('categoria')}")
+    print(f"[NOTION] Salvando: {dados.get('nome_ferramenta')} | {dados.get('categoria')} | transcrição: {len(transcricao)} chars")
 
     create_params = {
         "parent": {"database_id": NOTION_DATABASE_ID},
@@ -292,7 +315,7 @@ def salvar_no_notion(
                 "rich_text": [{"text": {"content": dados.get("observacoes", "")}}]
             },
             "Transcrição": {
-                "rich_text": [{"text": {"content": transcricao[:2000]}}]
+                "rich_text": _rich_text_blocks(transcricao)
             },
         },
     }
@@ -301,6 +324,16 @@ def salvar_no_notion(
         create_params["cover"] = {"type": "external", "external": {"url": thumbnail_url}}
 
     page = notion.pages.create(**create_params)
+    page_id = page["id"]
+
+    # Se transcrição passa de 20k chars, salva o restante no corpo da página
+    blocos_extras = _blocos_corpo(transcricao)
+    if blocos_extras:
+        print(f"[NOTION] Transcrição longa ({len(transcricao)} chars) — appending {len(blocos_extras)} blocos no corpo")
+        # Notion aceita até 100 blocos por chamada
+        for i in range(0, len(blocos_extras), 100):
+            notion.blocks.children.append(page_id, children=blocos_extras[i:i+100])
+
     print(f"[NOTION] Salvo! URL: {page['url']}")
     return page["url"]
 
