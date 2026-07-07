@@ -27,6 +27,7 @@ anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 notion = NotionClient(auth=os.environ["NOTION_TOKEN"])
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+INSTAGRAM_COOKIES = os.environ.get("INSTAGRAM_COOKIES", "")
 
 # ─── Modelos ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,14 @@ def baixar_video(url: str, tmpdir: str) -> tuple:
         "quiet": True,
         "no_warnings": True,
     }
+
+    # Cookies para Instagram (requer autenticação desde ~Jun/2025)
+    if "instagram.com" in url and INSTAGRAM_COOKIES:
+        cookie_file = os.path.join(tmpdir, "cookies.txt")
+        with open(cookie_file, "w") as f:
+            f.write(INSTAGRAM_COOKIES)
+        ydl_opts["cookiefile"] = cookie_file
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         titulo = info.get("title", "")
@@ -177,8 +186,8 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
   "nome_ferramenta": "título curto e descritivo para este conteúdo (nome de ferramenta, tema da dica, assunto da inspiração, etc.)",
   "categoria": "exatamente uma de: Ferramenta IA, Automação, Marketing, Conteúdo, Produtividade, Design, Dev, Dados, Negócios, Outro",
   "o_que_faz": "resumo objetivo em 1-2 frases do que este vídeo ensina ou mostra",
-  "casos_de_uso": "3 aplicações práticas e específicas separadas por vírgula",
-  "perfil_de_cliente": "2-3 perfis que mais se beneficiam deste conteúdo",
+  "casos_de_uso": "2-3 aplicações práticas pensando em perfis profissionais variados (empreendedores, freelancers, times de vendas, criadores de conteúdo, gestores, profissionais liberais etc). Seja específico na AÇÃO concreta que cada perfil faria. NUNCA direcione para médicos ou clínicas especificamente — pense AMPLO em que profissional comum se beneficiaria mais.",
+  "perfil_de_cliente": "2-3 perfis profissionais que mais se beneficiam deste conteúdo (ex: donos de pequenas empresas, consultores independentes, times de marketing, educadores)",
   "relevancia": número inteiro de 1 a 10 baseado em impacto e aplicabilidade,
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa",
   "tags": ["tag1", "tag2"],
@@ -200,7 +209,7 @@ Retorne APENAS um JSON válido, sem markdown, sem backticks, com esta estrutura 
     content.append({"type": "text", "text": prompt})
 
     resposta = anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         messages=[{"role": "user", "content": content}],
     )
@@ -226,13 +235,13 @@ OBSERVAÇÕES (análise editorial existente):
 Retorne APENAS um JSON válido, sem markdown, sem backticks:
 {{
   "o_que_faz": "resumo objetivo em 1-2 frases do que este conteúdo ou ferramenta faz",
-  "casos_de_uso": "3 aplicações práticas e específicas separadas por vírgula",
+  "casos_de_uso": "2-3 aplicações práticas pensando em perfis profissionais variados (empreendedores, freelancers, times de vendas, criadores de conteúdo, gestores, profissionais liberais etc). Seja específico na AÇÃO concreta. NUNCA direcione para médicos ou clínicas — pense AMPLO.",
   "perfil_de_cliente": "2-3 perfis que mais se beneficiam",
   "novidade": "exatamente uma de: 🔥 Alta, 🟡 Média, 🧊 Baixa"
 }}"""
 
     resposta = anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )
