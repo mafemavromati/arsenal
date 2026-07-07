@@ -27,7 +27,6 @@ anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 notion = NotionClient(auth=os.environ["NOTION_TOKEN"])
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-INSTAGRAM_COOKIES = os.environ.get("INSTAGRAM_COOKIES", "")
 
 # ─── Modelos ──────────────────────────────────────────────────────────────────
 
@@ -55,8 +54,8 @@ def verificar_assinatura(assinatura: str, corpo: bytes) -> bool:
     return hmac.compare_digest(assinatura, esperado)
 
 
-def baixar_video(url: str, tmpdir: str) -> tuple:
-    """Baixa o vídeo (até 720p), extrai o áudio e captura a URL do thumbnail."""
+def _baixar_via_ytdlp(url: str, tmpdir: str) -> tuple:
+    """Tenta baixar via yt-dlp (funciona pra TikTok, YouTube, e Reels públicos)."""
     ydl_opts = {
         "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "outtmpl": f"{tmpdir}/video.%(ext)s",
@@ -64,13 +63,6 @@ def baixar_video(url: str, tmpdir: str) -> tuple:
         "quiet": True,
         "no_warnings": True,
     }
-
-    # Cookies para Instagram (requer autenticação desde ~Jun/2025)
-    if "instagram.com" in url and INSTAGRAM_COOKIES:
-        cookie_file = os.path.join(tmpdir, "cookies.txt")
-        with open(cookie_file, "w") as f:
-            f.write(INSTAGRAM_COOKIES)
-        ydl_opts["cookiefile"] = cookie_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -80,7 +72,64 @@ def baixar_video(url: str, tmpdir: str) -> tuple:
 
     arquivos = glob_module.glob(f"{tmpdir}/video.*")
     caminho_video = arquivos[0] if arquivos else None
+    return titulo, descricao, caminho_video, thumbnail_url
 
+
+def _baixar_via_parthdl(url: str, tmpdir: str) -> tuple:
+    """Fallback: baixa Reels do Instagram via parth-dl (sem cookies, sem login)."""
+    from parth_dl import InstagramDownloader
+
+    print(f"[FALLBACK] Tentando parth-dl para Instagram: {url}")
+    dl = InstagramDownloader(verbose=False)
+    caminho_saida = os.path.join(tmpdir, "video.mp4")
+    dl.download(url, output=caminho_saida)
+
+    if not os.path.exists(caminho_saida):
+        # parth-dl pode salvar com nome diferente — procura qualquer vídeo
+        arquivos = glob_module.glob(f"{tmpdir}/*.mp4")
+        if arquivos:
+            caminho_saida = arquivos[0]
+        else:
+            raise Exception("parth-dl não conseguiu baixar o vídeo")
+
+    # parth-dl não retorna metadados ricos como yt-dlp
+    titulo = ""
+    descricao = ""
+    thumbnail_url = ""
+
+    # Tenta extrair metadados básicos via get_info
+    try:
+        info = dl.get_info(url)
+        if isinstance(info, dict):
+            titulo = info.get("title", "") or info.get("caption", "") or ""
+            thumbnail_url = info.get("thumbnail", "") or info.get("display_url", "") or ""
+    except Exception:
+        pass  # metadados são nice-to-have, não essenciais
+
+    return titulo, descricao, caminho_saida, thumbnail_url
+
+
+def baixar_video(url: str, tmpdir: str) -> tuple:
+    """Baixa o vídeo, extrai o áudio e captura a URL do thumbnail.
+    Para Instagram: tenta yt-dlp primeiro, fallback para parth-dl.
+    Para outros sites: usa yt-dlp normalmente."""
+    eh_instagram = "instagram.com" in url
+
+    titulo, descricao, caminho_video, thumbnail_url = None, None, None, None
+
+    # Tenta yt-dlp primeiro (funciona pra tudo, inclusive Reels públicos)
+    try:
+        titulo, descricao, caminho_video, thumbnail_url = _baixar_via_ytdlp(url, tmpdir)
+        print(f"[DOWNLOAD] yt-dlp OK: {titulo}")
+    except Exception as e:
+        if eh_instagram:
+            print(f"[DOWNLOAD] yt-dlp falhou para Instagram ({e}). Tentando parth-dl...")
+            titulo, descricao, caminho_video, thumbnail_url = _baixar_via_parthdl(url, tmpdir)
+            print(f"[DOWNLOAD] parth-dl OK")
+        else:
+            raise  # Para não-Instagram, propaga o erro normalmente
+
+    # Extrai áudio do vídeo
     caminho_audio = f"{tmpdir}/audio.mp3"
     subprocess.run(
         ["ffmpeg", "-i", caminho_video, "-vn", "-ar", "16000", "-ac", "1",
